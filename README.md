@@ -1,177 +1,199 @@
-https://blog.imxiaohe.com/2026/09/123.html
+# VPN Gate SSTP 节点自动优选（edgetunnel 链式代理）
 
-Cloudflare Worker 脚本代码下载地址： [点此跳转]
-前往并打开上方占位符中的 Worker 脚本代码链接，将代码全部复制备用。
-登录你的 Cloudflare 控制台。
-在左侧导航进入 Workers 和 Pages ➔ 点击 创建应用程序 ➔ 选择 创建 Worker。
-为 Worker 命名后点击右下角 部署。
-部署完成后点击 编辑代码，清空原有代码，将第 1 步复制的代码粘贴进去，点击右上角 部署 保存。
-记下生成的测速域名：在 Worker 详情页记下分配的默认域名（例如 xxxx.xxxx.workers.dev），或者在 设置 ➔ 触发器 中绑定的自定义域名。该域名在后续步骤中将作为 Worker 检测域名 填入代码。
-第二步：新建 GitHub 仓库与上传代码
-1. 新建 GitHub 仓库
-登录 GitHub，点击右上角 + ➔ New repository。
-仓库名称自定义（例如 gate）。
-仓库类型必须选择 Public（公开）。
-勾选 Add a README file，点击 Create repository 创建完成。
-2. 源码下载与普通文件上传
-请前往以下预设的代码文件下载地址获取基础代码文件：
+自动抓取 [VPN Gate](https://www.vpngate.net/) 的 SSTP 家宽/机房节点，调用检测 Worker 逐个验证可用性，按国家分组、标注住宅/机房，生成可直接粘贴进 edgetunnel 后台的链式代理清单。**每 30 分钟自动更新一次。**
 
-代码文件 下载地址1： [点此跳转]
-代码文件 下载地址2： [点此跳转]
-下载完成后，在你的 GitHub 仓库主页点击 Add file ➔ Upload files，将对应的核心运行脚本（如 vpngate.py、requirements.txt）以及 web/ 静态模板文件上传并点击 Commit changes 保存。
+> 核心价值：VPN Gate 的 SSTP 节点 30 分钟就换一批，手动测试筛选太痛苦。本仓库把它全自动了——你只需定期打开一个固定 URL 复制粘贴。
 
-3. 手动创建无法直接上传的工作流文件（必做）
-⚠️ 注意事项： GitHub 网页端不支持直接拖拽上传带点开头的路径（.github/），因此必须通过网页端新建文件并手动录入路径。
-在仓库根目录点击 Add file ➔ Create new file。
-在文件名输入框中输入路径及文件名：.gitignore。
-在下方代码编辑框中，完整粘贴以下忽略规则代码：
-# 由 vpngate.py 运行时生成 (data.json + index.html), 不入库
-public/
-__pycache__/
-*.pyc
-粘贴完成后，点击页面最下方的 Commit changes 保存文件。
+---
 
-在仓库根目录再次点击 Add file ➔ Create new file。
-在文件名输入框中输入路径及文件名：.github/workflows/check.yml（每输入一个斜杠 / 系统会自动生成目录结构）。
-在下方代码编辑框中，完整粘贴仓库原版的工作流配置代码：
-name: VPN Gate Node Check
+## 引用的开源项目（致谢）
 
-on:
-  # 定时检测: 默认每 30 分钟一次。改成每 60 分钟: cron: "0 * * * *"
-  schedule:
-    - cron: "*/30 * * * *"
-  workflow_dispatch:
+本项目建立在以下开源项目之上：
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+| 项目 | 用途 | 链接 |
+| :--- | :--- | :--- |
+| **cmliu/edgetunnel** | VLESS 代理 + 链式代理（节点备注里的链式代理指令），节点最终通过它使用 | https://github.com/cmliu/edgetunnel |
+| **lsh8848/cm-Workers-CheckSocks5** | 检测 Worker：验证 SSTP 节点可用性并读取出口 IP（住宅/机房判定） | https://github.com/lsh8848/cm-Workers-CheckSocks5 |
+| **fdciabdul/Vpngate-Scraper-API** | VPN Gate 节点数据的 GitHub 镜像（官方源失效时回退） | https://github.com/fdciabdul/Vpngate-Scraper-API |
+| **VPN Gate** | SSTP 节点数据源 | https://www.vpngate.net/ |
 
-concurrency:
-  group: gate-check
-  cancel-in-progress: false
+---
 
-jobs:
-  check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+## 架构（数据流向）
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+```text
+VPN Gate 官方源
+      │  (每 30 分钟，GitHub Actions 定时抓取)
+      ▼
+筛选 SSTP 节点 → 去重
+      │
+      ▼
+检测 Worker (CheckSocks5，部署在 Cloudflare)
+      │  GET /check?sstp=vpn:vpn@host:port
+      │  返回 success + 出口 IP(住宅/机房判定)
+      ▼
+保留成功节点 → 按国家分组 → 住宅/机房标注 → 延迟排序
+      │
+      ▼
+生成 hosts.txt (走 GitHub Pages 发布)
+      │  你全选复制
+      ▼
+粘贴进 edgetunnel 后台「自定义优选IP」框
+      │  edgetunnel 自动把链式代理指令编码进节点 path
+      ▼
+客户端订阅 edgetunnel 订阅 → 使用 SSTP 家宽节点
+```
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+---
 
-      - name: Get VPN Gate nodes + check via Cloudflare Worker + build page
-        run: python vpngate.py
-        env:
-          # 已部署的检测 Worker (不要改动: 检测统一走这里)
-          CHECK_WORKER: "https://check.helei.kdns.fr/check?sstp=vpn:vpn@"
-          CHECK_CONCURRENCY: "32"
-          CHECK_TIMEOUT: "90"
+## 一、完整部署教程（从零开始，面向新用户）
 
-      - name: Ensure GitHub Pages is enabled (one-time auto setup)
-        run: |
-          code=$(curl -s -o /dev/null -w '%{http_code}' \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/pages")
-          echo "Pages API status: $code"
-          if [ "$code" = "404" ]; then
-            echo "首次运行: 启用 GitHub Pages (source = GitHub Actions, 目录 /public)"
-            curl -sS -X PUT \
-              -H "Authorization: Bearer $GITHUB_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d '{"build_type":"workflow","source":{"branches":["main"],"path":"/public"}}' \
-              "https://api.github.com/repos/$GITHUB_REPOSITORY/pages"
-            echo
-            sleep 10
-          fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+### 前置条件
 
-      - name: Configure Pages
-        uses: actions/configure-pages@v5
+- 一个 Cloudflare 账号（免费即可）
+- 一个 GitHub 账号
+- 一个**已经部署好的 edgetunnel**（含自己的域名 + UUID，部署方法见 [edgetunnel 文档](https://github.com/cmliu/edgetunnel)）
 
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: 'public'
+> 下文所有「你的GitHub用户名 / 仓库名 / 域名 / UUID / Worker域名」都是占位符，替换成你自己的。
 
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+### 第 1 步：部署检测 Worker（CheckSocks5）
 
-      - name: Show site URL
-        run: 'echo "site: https://jerylihub.github.io/gate/ (deploy outcome: ${{ steps.deployment.outcome }})"'
-粘贴完成后，点击页面最下方的 Commit changes 保存文件。
+检测 Worker 负责验证「SSTP 节点能不能用」以及「出口是住宅还是机房」，必须自己部署一个：
 
-三、步骤三：GitHub Actions 权限与 Pages 静态托管设置
-1. 开启 Actions 读写权限
-点击仓库顶部的 Settings。
-在左侧菜单点击 Actions ➔ General。
-向下滑动找到 Workflow permissions 区域，将选项勾选为：
-👉 Read and write permissions。
-点击 Save 保存设置。
-2. 设置 GitHub Pages 静态站点
-在仓库的 Settings 页面中，左侧点击 Pages。
-在 Build and deployment 区域，确保 Source 选为 github actions。
-四、步骤四：获取优选域名并修改核心代码配置
-1. 获取最新优选域名
-打开优选域名提供网址，筛选出测速优异的 Cloudflare 优选 IP 或优选域名备用：
+1. 打开 https://github.com/lsh8848/cm-Workers-CheckSocks5 ，点 **Fork**（或直接下载其中的 _worker.js）
+2. 进 Cloudflare 控制台 → Workers 和 Pages → 创建 → 创建 Worker
+3. 把 _worker.js 的全部内容粘贴进编辑器，点「部署」
+4. 记下这个 Worker 的域名，形如 https://xxx.你的用户名.workers.dev （也可绑自定义域名）
+5. 验证：浏览器打开 https://你的Worker域名/check?sstp=vpn:vpn@任意节点:端口 ，能返回 JSON 即成功
 
-优选域名提供网址： [https://bestcf.fxxk.dedyn.io/]
-2. 在 vpngate.py 中修改三处核心配置
-打开仓库根目录下的 vpngate.py 文件，点击右上角的 ✏️ 铅笔图标进行在线编辑，必须严格修改以下三处配置：
+> 该 Worker 不需要任何环境变量、没有鉴权，部署完即用；它原生支持 SSTP 检测，无需改代码。
 
-位置一：替换 Worker 测速检测端（文件第 52 ~ 55 行左右）
-找到定义 WORKER_CHECK_URL 的代码行，将默认域名 check.helei.kdns.fr 替换为你第一步部署完成的 Cloudflare Worker 域名（保留前面的 https:// 以及末尾的 /check?sstp=vpn:vpn@）：
+### 第 2 步：Fork 本仓库
 
-# 原代码第 52-55 行左右：
-WORKER_CHECK_URL = os.environ.get("CHECK_WORKER", "https://你的Worker域名/check?sstp=vpn:vpn@")
-位置二：替换 Cloudflare 优选域名池（文件第 461 ~ 463 行左右）
-找到定义 EDGE_HOSTS 的代码段，这里是 edgetunnel 的入口优选地址池。将双引号内由逗号分隔的默认域名（如 saas.072159.xyz:443,...）替换为你在优选网站获取到的最新域名或 IP，每个地址后必须带上 :443 端口：
+在 GitHub 上打开本仓库，点 **Fork**，复制到你账号下（变成 你的GitHub用户名/仓库名）。
 
-# 原代码第 276-284 行左右：
+### 第 3 步：修改配置（重点，Fork 后要改的全在这）
+
+进你 fork 的仓库，改下面几处：
+
+| 文件 | 位置 | 改成什么 | 为什么 |
+| :--- | :--- | :--- | :--- |
+| .github/workflows/check.yml | env 里的 CHECK_WORKER | 你的检测 Worker 域名，形如 https://xxx.workers.dev/check?sstp=vpn:vpn@ | 检测统一走你自己的 Worker |
+| vpngate.py | 约 515 行 EDT_DOMAIN | 你的 edgetunnel 域名 | 链式代理入口的 SNI/host |
+| vpngate.py | 约 514 行 EDT_UUID | 你的 edgetunnel UUID | 链式代理编码密钥 |
+| vpngate.py | 约 455 行 EDGE_HOSTS | 你测出来的优选域名 | 入口用谁，决定稳不稳 |
+| vpngate.py | CHAIN_URL / HOSTS_URL / SUB_URL | 把里面写死的固定地址换成 你的用户名/仓库名 | 清单注释头里的固定地址 |
+| .github/workflows/check.yml | 最后的 Show site URL | 把里面写死的站点地址换成你的 | 运行日志里显示的站点地址 |
+
+> CHECK_WORKER 通过 workflow 环境变量传给脚本、会覆盖 vpngate.py 里的默认值，所以检测 Worker 域名只需在 workflow 里改一处。EDT_DOMAIN / EDT_UUID / EDGE_HOSTS 是 vpngate.py 里的默认值，直接改源码。
+
+### 第 4 步：开启 GitHub Pages 与 Actions
+
+1. 进你 fork 的仓库 → Settings → Pages，Source 设为 **GitHub Actions**（首次运行 workflow 也会尝试自动开启）
+2. 进 Actions 页，若提示启用 Actions 就点启用
+3. 手动触发一次：Actions → VPN Gate Node Check → Run workflow → Run workflow
+4. 等它跑完（约 1 分钟），看到绿色 ✓ 即成功
+
+### 第 5 步：确认产物
+
+跑完后，你的站点地址是：
+
+```text
+https://你的GitHub用户名.github.io/仓库名/hosts.txt
+```
+
+浏览器打开，能看到一堆「优选域名:443#国家-住宅-XX …」的行，就说明全部打通了。
+
+### 第 6 步：使用（见下面「使用教程」）
+
+---
+
+## 二、使用教程
+
+### 前置条件
+- 已部署 edgetunnel（自己的域名 + UUID）
+- 一个客户端：v2rayN / Clash Verge / v2rayNG 等
+
+### 步骤（约 1 分钟）
+
+1. 打开 https://你的GitHub用户名.github.io/仓库名/hosts.txt
+2. 浏览器里 Ctrl+A 全选 → Ctrl+C 复制
+3. 进 edgetunnel 后台（你的域名/admin），找到「自定义优选IP」文本框
+4. 光标移到现有内容末尾，Ctrl+V 粘贴
+5. 点保存（右下角提示「自定义IP已保存」）
+6. 客户端里更新/刷新订阅（订阅地址是 edgetunnel 后台给你的那个）
+7. 测延迟，选一个节点用
+
+### 节点名含义
+
+节点名格式：国家-住宅-编号 / 国家-机房-编号，例如 日本-住宅-01、韩国-机房-02。住宅和机房各自独立编号，一眼区分。
+
+### 每 30 分钟更新
+节点每 30 分钟换一批，想换新节点时：重新打开 hosts.txt → 全选复制 → 覆盖粘贴。名字保持不变，只是背后的节点地址换了。
+
+---
+
+## 三、如何更换优选域名
+
+入口地址用的是「优选域名」，决定客户端连 Cloudflare 用哪个 IP、稳不稳。域名被墙或延迟高，可用节点就少。
+
+### 在哪个文件改
+- 文件：vpngate.py
+- 位置：约 455 行 EDGE_HOSTS = [ ... ]
+
+### 改法
+1. 用测速工具（如 bestcf）测一批 Cloudflare 优选域名，挑「延迟低 + 实际能连通」的
+2. 打开 vpngate.py，把 EDGE_HOSTS 里的域名列表换成你测出来的（逗号分隔，格式 域名:443）
+3. 提交推送，等下一次自动运行（最多 30 分钟）或手动触发 Action
+
+### 示例
+```python
 EDGE_HOSTS = [
     h.strip()
     for h in os.environ.get(
         "EDGE_HOSTS",
-        "填入优选域名1:443,填入优选域名2:443,填入优选域名3:443",
+        "saas.072159.xyz:443,hzytjy.cn:443,ali.nonull.pp.ua:443,"
+        "auto.dolby.dpdns.org:443,cdn.cnno.de:443,saas.sin.fan:443,"
+        "cf.777791.xyz:443",
     ).split(",")
     if h.strip()
 ]
-位置三：必须配置用户自己的 edgetunnel 节点信息（文件第 525 ~ 526 行左右，必做项）
-特别注意：代码内预留的 EDT_UUID 和 EDT_DOMAIN 是演示参数。你必须替换为自己实际部署的 edgetunnel 节点域名和对应的 UUID 密钥，否则自动生成的 sub.txt 订阅链接将无法连接使用！
+```
 
-edgetunnel部署代码：【点此跳转】
+### 技巧
+- 只留实测能通的域名：bestcf 里延迟低 ≠ 一定能通，挑「延迟低 + 实际连接成功」的
+- 数量建议 5～10 个：太少单域名负担重，太多容易混进被墙的域名拖累可用率
 
-# 原代码第 338-341 行左右：
-EDT_UUID = os.environ.get("EDT_UUID", "填入你自己edgetunnel的UUID")
-EDT_DOMAIN = os.environ.get("EDT_DOMAIN", "填入你自己edgetunnel绑定的节点域名")
-EDT_FINGERPRINT = os.environ.get("EDT_FINGERPRINT", "chrome")
-三处关键参数修改核对无误后，滑动到页面最下方点击 Commit changes 保存提交。
+---
 
-五、步骤五：启动构建并获取两大生成页面
-1. 手动运行 Actions 任务
-点击仓库顶部的 Actions 选项卡。
-在左侧 Workflows 列表点击 VPN Gate Node Check。
-点击右侧的 Run workflow 按钮，弹出菜单中再次点击绿色的 Run workflow 触发运行。
-等待 1-3 分钟，当工作流出现绿色对号 ✅ 标识，即表示节点检测和页面生成已经完成。
-2. 获取两大访问地址
-工作流完成后，GitHub Pages 会自动发布生成两个访问页面（将下方链接中的 <username> 替换为你的 GitHub 用户名，<repository> 替换为你的仓库名称）：
+## 四、配置速查表（vpngate.py）
 
-🌐 页面一：节点前端展示与下载页面（GitHub Pages 网址）
-用于直接在浏览器端实时查看经过测速的节点列表、延迟、带宽，并可直接下载 .ovpn 配置文件：
+| 常量 | 约位置 | 说明 |
+| :--- | :--- | :--- |
+| EDGE_HOSTS | 455 行 | 入口优选域名（换域名改这里） |
+| EDT_DOMAIN | 515 行 | 你的 edgetunnel 域名 |
+| EDT_UUID | 514 行 | 你的 edgetunnel UUID |
+| EDT_FINGERPRINT | 516 行 | TLS 指纹（默认 chrome） |
+| WORKER_CHECK_URL | 54 行 | 检测 Worker（本地运行默认值，Action 里用 workflow 的 CHECK_WORKER 覆盖） |
+| COUNTRY_ZH | 78 行 | 国家中文名映射 |
 
-https://你的GitHub用户名.github.io/仓库名/
-📋 页面二：复制内容并粘贴到 EDG 后台的专用网页
-打开此页面后，可直接全选复制页面中的节点配置文本，然后粘贴进 EDG 后台系统：
+---
 
-https://你的GitHub用户名.github.io/仓库名/hosts.txt
-🎉 部署完成： 后续系统会根据 check.yml 中的定时配置（每 30 分钟自动运行一次）持续抓取、测速并提交最新数据，两个前端网页也会自动无缝同步最新节点。
-Github仓库地址：https://github.com/hezhanleiok/gate
+## 五、常见问题
+
+### 只有几个节点能连
+入口优选域名大部分被墙。用 bestcf 重新测速，把 EDGE_HOSTS 换成实测能通的域名（见「三」）。
+
+### 全部 -1
+检查：edgetunnel 是否部署好、域名是否解析到 Cloudflare、UUID 是否填对、传输协议是否对得上（默认按 ws/TLS 生成）。
+
+### 30 分钟没更新
+到 Actions 页看最近一次运行是否成功、cron 是否还在（.github/workflows/check.yml 里的 */30 * * * *）。
+
+### 检测 Worker 报错
+确认 Worker 部署成功、域名填对（workflow 里的 CHECK_WORKER），浏览器直接访问 https://你的Worker/check?sstp=... 看是否返回 JSON。
+
+---
+
+*流水线：GitHub Actions（每 30 分钟 cron） → vpngate.py → 检测 Worker → GitHub Pages*
+
